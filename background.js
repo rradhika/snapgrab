@@ -51,12 +51,6 @@ async function annotate(dataUrl, x, y, dpr, stepNumber) {
     ctx.fillStyle = '#ff3b30';
     ctx.fill();
 
-    ctx.fillStyle = '#ffffff';
-    ctx.font = `bold ${12 * dpr}px sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(String(stepNumber), px, py + 1 * dpr);
-
     const out = await canvas.convertToBlob({ type: 'image/png' });
     return await blobToDataURL(out);
   } catch (e) {
