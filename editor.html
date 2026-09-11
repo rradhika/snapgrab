@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>SnapGrab — Guide Editor</title>
+<link rel="stylesheet" href="editor.css" />
+</head>
+<body>
+  <header class="topbar">
+    <input id="docTitle" class="doc-title" placeholder="Untitled Guide" />
+    <div class="actions">
+      <button id="exportHtml">Export HTML</button>
+      <button id="exportMd">Export Markdown</button>
+      <button id="printBtn">Print / PDF</button>
+      <button id="clearBtn" class="danger">Clear Guide</button>
+    </div>
+  </header>
+  <main id="steps"></main>
+  <div id="empty" class="empty hidden">
+    <p>No steps captured yet. Open the SnapGrab popup, click <strong>Start Recording</strong>, then interact with a page. Your steps will show up here once you stop recording.</p>
+  </div>
+  <script src="editor.js"></script>
+</body>
+</html>

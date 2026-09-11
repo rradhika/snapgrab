@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">📸</div>
+      <div>
+        <h1>SnapGrab</h1>
+        <p class="sub">Turn clicks into a step-by-step guide</p>
+      </div>
+    </header>
+
+    <div id="idle" class="panel">
+      <p class="hint">Click start, then use the page as you normally would. We'll capture an annotated screenshot for every click so you can share a guide when you're done.</p>
+      <button id="startBtn" class="primary">● Start Recording</button>
+      <div id="resumeBox" class="hidden">
+        <p class="hint">You have an unfinished guide with <span id="resumeCount">0</span> step(s).</p>
+        <button id="resumeBtn" class="secondary">Open Guide Editor</button>
+      </div>
+    </div>
+
+    <div id="active" class="panel hidden">
+      <div class="status"><span class="dot"></span>Recording — <strong id="count">0</strong> step(s)</div>
+      <button id="stopBtn" class="primary">■ Stop &amp; Create Guide</button>
+      <button id="discardBtn" class="danger">Discard</button>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
