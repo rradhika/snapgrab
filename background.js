@@ -5,7 +5,10 @@ const state = {
   tabId: null,
   windowId: null,
   justStarted: false,
+  lastCaptureTime: 0,
 };
+
+let pendingCapture = null; // { id, tabId, promise, timestamp }
 
 async function getSteps() {
   const { snapgrab_steps = [] } = await chrome.storage.local.get('snapgrab_steps');
@@ -51,11 +54,43 @@ async function annotate(dataUrl, x, y, dpr, stepNumber) {
     ctx.fillStyle = '#ff3b30';
     ctx.fill();
 
+    if (typeof stepNumber === 'number') {
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `bold ${Math.round(11 * dpr)}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(stepNumber), px, py);
+    }
+
     const out = await canvas.convertToBlob({ type: 'image/png' });
     return await blobToDataURL(out);
   } catch (e) {
     console.warn('SnapGrab: annotation failed, using raw screenshot', e);
     return dataUrl;
+  }
+}
+
+async function safeCaptureVisibleTab(windowId, retries = 2) {
+  // Ensure at least 450ms spacing between calls to stay well within
+  // Chromium's MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND (2 calls/sec)
+  const now = Date.now();
+  const elapsed = now - (state.lastCaptureTime || 0);
+  if (elapsed < 450) {
+    await new Promise((r) => setTimeout(r, 450 - elapsed));
+  }
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      state.lastCaptureTime = Date.now();
+      return await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+    } catch (err) {
+      const errStr = String(err);
+      if (attempt < retries && (errStr.includes('MAX_CAPTURE') || errStr.includes('quota'))) {
+        await new Promise((r) => setTimeout(r, 400));
+        continue;
+      }
+      throw err;
+    }
   }
 }
 
@@ -91,6 +126,8 @@ async function startRecording(tab) {
   state.tabId = tab.id;
   state.windowId = tab.windowId;
   state.justStarted = true;
+  state.lastCaptureTime = 0;
+  pendingCapture = null;
 
   await chrome.storage.local.set({ snapgrab_meta: { title: tab.title || 'Untitled Guide' } });
   await injectIfNeeded(tab.id);
@@ -103,6 +140,7 @@ async function startRecording(tab) {
 async function stopRecording(opts = {}) {
   const tabId = state.tabId;
   state.active = false;
+  pendingCapture = null;
   await notifyTab(tabId, { type: 'SNAPGRAB_STATE', recording: { active: false }, count: 0 });
 
   if (opts.discard) {
@@ -119,21 +157,65 @@ async function stopRecording(opts = {}) {
   state.windowId = null;
 }
 
+async function handlePreCapture(tab) {
+  if (!state.active || tab.id !== state.tabId) return;
+
+  const captureId = crypto.randomUUID();
+  const promise = (async () => {
+    try {
+      return await safeCaptureVisibleTab(state.windowId);
+    } catch (err) {
+      console.warn('SnapGrab: pre-capture failed', err);
+      return null;
+    }
+  })();
+
+  pendingCapture = {
+    id: captureId,
+    tabId: tab.id,
+    promise,
+    timestamp: Date.now(),
+  };
+
+  // Auto-expire pre-capture after 1000ms if no click consumes it
+  setTimeout(() => {
+    if (pendingCapture && pendingCapture.id === captureId) {
+      pendingCapture = null;
+      notifyTab(tab.id, { type: 'SNAPGRAB_SHOW_OVERLAY' });
+    }
+  }, 1000);
+}
+
 async function captureStep(tab, payload) {
   if (!state.active || tab.id !== state.tabId) return;
 
-  await notifyTab(tab.id, { type: 'SNAPGRAB_HIDE_OVERLAY' });
-  await new Promise((r) => setTimeout(r, 60)); // let the page repaint without our overlay before screenshotting
+  let dataUrl = null;
 
-  let dataUrl;
-  try {
-    dataUrl = await chrome.tabs.captureVisibleTab(state.windowId, { format: 'png' });
-  } catch (e) {
-    console.warn('SnapGrab: screenshot capture failed', e);
-    await notifyTab(tab.id, { type: 'SNAPGRAB_SHOW_OVERLAY' });
-    return;
+  // Use pre-captured screenshot if available from pointerdown (taken before DOM mutation/collapse)
+  if (
+    payload.kind === 'click' &&
+    pendingCapture &&
+    pendingCapture.tabId === tab.id &&
+    Date.now() - pendingCapture.timestamp < 1000
+  ) {
+    const current = pendingCapture;
+    pendingCapture = null;
+    dataUrl = await current.promise;
   }
 
+  // Fallback: capture on-demand (e.g. keyboard click, input step, navigation)
+  if (!dataUrl) {
+    await notifyTab(tab.id, { type: 'SNAPGRAB_HIDE_OVERLAY' });
+    try {
+      dataUrl = await safeCaptureVisibleTab(state.windowId);
+    } catch (e) {
+      console.warn('SnapGrab: screenshot capture failed', e);
+      await notifyTab(tab.id, { type: 'SNAPGRAB_SHOW_OVERLAY' });
+      return;
+    }
+  }
+
+  // Restore the overlay on the tab
   await notifyTab(tab.id, { type: 'SNAPGRAB_SHOW_OVERLAY' });
 
   const steps = await getSteps();
@@ -162,7 +244,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     switch (msg.type) {
       case 'SNAPGRAB_START': {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const tab = sender.tab || (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0] || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+        console.log('SnapGrab: SNAPGRAB_START resolved tab:', tab?.id, tab?.url);
         if (tab) await startRecording(tab);
         sendResponse({ ok: true });
         break;
@@ -179,7 +262,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ active: state.active, count: steps.length });
         break;
       }
+      case 'SNAPGRAB_PRE_CAPTURE':
+        console.log('SnapGrab: received SNAPGRAB_PRE_CAPTURE from tab:', sender.tab?.id);
+        if (sender.tab) await handlePreCapture(sender.tab);
+        sendResponse({ ok: true });
+        break;
       case 'SNAPGRAB_CAPTURE':
+        console.log('SnapGrab: received SNAPGRAB_CAPTURE from tab:', sender.tab?.id, msg.payload);
         if (sender.tab) await captureStep(sender.tab, msg.payload);
         sendResponse({ ok: true });
         break;

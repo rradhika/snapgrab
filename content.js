@@ -112,11 +112,26 @@
     return textOf(el) || el.name || el.type || 'field';
   }
 
-  function describeClick(el) {
-    const tag = el.tagName.toLowerCase();
-    const text = textOf(el);
+  function findActionableElement(el) {
+    if (!el || !(el instanceof Element)) return el;
+    return el.closest('button, a, input, select, textarea, [role="button"], summary') || el;
+  }
+
+  function isOverlayElement(el, e) {
+    if (!host) return false;
+    if (el === host || host.contains(el)) return true;
+    if (e && typeof e.composedPath === 'function') {
+      return e.composedPath().includes(host);
+    }
+    return false;
+  }
+
+  function describeClick(rawEl) {
+    const el = findActionableElement(rawEl);
+    const tag = (el.tagName || '').toLowerCase();
+    const text = textOf(el) || textOf(rawEl);
     if (tag === 'a') return `Clicked the link "${text || el.href}"`;
-    if (tag === 'button' || (tag === 'input' && ['button', 'submit'].includes(el.type)) || el.getAttribute('role') === 'button') {
+    if (tag === 'button' || (tag === 'input' && ['button', 'submit'].includes(el.type)) || el.getAttribute('role') === 'button' || tag === 'summary') {
       return `Clicked the button "${text || 'button'}"`;
     }
     if (tag === 'input' && ['checkbox', 'radio'].includes(el.type)) {
@@ -143,20 +158,55 @@
     chrome.runtime.sendMessage({ type: 'SNAPGRAB_CAPTURE', payload }).catch(() => {});
   }
 
+  let preCaptureTimer = null;
+
+  function onPointerDown(e) {
+    if (!recording?.active) return;
+    if (e.button !== 0) return; // only primary left-click
+    const el = e.target;
+    if (!el || isOverlayElement(el, e)) return;
+
+    // Immediately hide our overlay so it won't appear in the screenshot
+    if (host) host.style.visibility = 'hidden';
+
+    // Ensure the compositor has rendered the frame with the overlay hidden,
+    // then immediately trigger pre-capture before click / DOM mutation.
+    requestAnimationFrame(() => {
+      chrome.runtime.sendMessage({
+        type: 'SNAPGRAB_PRE_CAPTURE',
+      }).catch(() => {});
+    });
+
+    // Safety timeout: restore overlay if user dragged or cancelled click
+    clearTimeout(preCaptureTimer);
+    preCaptureTimer = setTimeout(() => {
+      if (host) host.style.visibility = '';
+    }, 800);
+  }
+
+  function onPointerCancel() {
+    clearTimeout(preCaptureTimer);
+    if (host) host.style.visibility = '';
+  }
+
   function onClick(e) {
     if (!recording?.active) return;
     const el = e.target;
-    if (!el || (host && host.contains(el))) return;
+    if (!el || isOverlayElement(el, e)) return;
+
+    clearTimeout(preCaptureTimer);
+
+    // Show the visual ripple ring on screen for live feedback
     showRing(e.clientX, e.clientY);
-    setTimeout(() => {
-      sendCapture({
-        kind: 'click',
-        description: describeClick(el),
-        x: e.clientX,
-        y: e.clientY,
-        dpr: window.devicePixelRatio || 1,
-      });
-    }, 120);
+
+    // Send the capture immediately — NO artificial delay!
+    sendCapture({
+      kind: 'click',
+      description: describeClick(el),
+      x: e.clientX,
+      y: e.clientY,
+      dpr: window.devicePixelRatio || 1,
+    });
   }
 
   function commitInput(el) {
@@ -165,6 +215,9 @@
     const last = lastValues.get(el);
     if (last === el.value) return;
     lastValues.set(el, el.value);
+
+    // Synchronously hide overlay before taking screenshot
+    if (host) host.style.visibility = 'hidden';
     sendCapture({ kind: 'input', description: describeInput(el) });
   }
 
@@ -177,6 +230,8 @@
     if (e.key === 'Enter' && ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) commitInput(e.target);
   }
 
+  document.addEventListener('pointerdown', onPointerDown, true);
+  document.addEventListener('pointercancel', onPointerCancel, true);
   document.addEventListener('click', onClick, true);
   document.addEventListener('change', onChange, true);
   document.addEventListener('keydown', onKeydown, true);
@@ -192,6 +247,8 @@
       else hidePill();
     }
     if (msg.type === 'SNAPGRAB_STEP_ADDED' && recording?.active) {
+      clearTimeout(preCaptureTimer);
+      if (host) host.style.visibility = '';
       showPill(msg.count);
     }
     // Keep the recording pill/ring out of the actual screenshot pixels.
@@ -201,6 +258,7 @@
       return;
     }
     if (msg.type === 'SNAPGRAB_SHOW_OVERLAY') {
+      clearTimeout(preCaptureTimer);
       if (host) host.style.visibility = '';
       sendResponse({ ok: true });
       return;
